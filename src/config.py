@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     graph_authority: str | None = Field(None, alias="GRAPH_AUTHORITY")
     graph_scopes_raw: str = Field("Mail.Read", alias="GRAPH_SCOPES")
     graph_page_size: int = Field(25, alias="GRAPH_PAGE_SIZE")
+    graph_mail_folder: str | None = Field("Inbox", alias="GRAPH_MAIL_FOLDER")
     graph_invoice_subject_keywords_raw: str = Field(
         "invoice;rechnung", alias="GRAPH_INVOICE_SUBJECT_KEYWORDS"
     )
@@ -101,12 +102,23 @@ class Settings(BaseSettings):
         "graph_authority",
         "paperless_document_type_id",
         "paperless_correspondent_id",
+        "graph_mail_folder",
         mode="before",
     )
     @classmethod
     def _empty_str_to_none(cls, value):
         if isinstance(value, str) and value.strip() == "":
             return None
+        return value
+
+    @field_validator("graph_mail_folder", mode="before")
+    @classmethod
+    def _normalize_mail_folder(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
         return value
 
     def invoice_title(self, message_subject: str, fallback: str) -> str:

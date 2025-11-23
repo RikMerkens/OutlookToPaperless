@@ -17,6 +17,7 @@ Automation pipeline that downloads invoice attachments from Outlook (via Microso
    - `GRAPH_INVOICE_SUBJECT_KEYWORDS` – semicolon-separated keywords matched against message subjects.
    - `GRAPH_INVOICE_FILENAME_PATTERNS` – semicolon-separated substrings or regex fragments matched against attachment names.
    - `GRAPH_SENDER_WHITELIST` – semicolon-separated list of trusted invoice senders.
+   - `GRAPH_MAIL_FOLDER` – restricts processing to a specific Outlook folder (default `Inbox`). Leave blank to scan the whole mailbox, provide a slash-separated path (e.g., `Inbox/Invoices`), or prefix with `id:` when you already know the Graph folder ID.
    - `GRAPH_SCOPES` – delegated Graph scopes requested during device code login (default `Mail.Read`).
    - `GRAPH_TOKEN_CACHE` – path where the MSAL refresh token cache lives (default `data/msal_token_cache.bin`); keep this stable across scheduled runs.
    - `PROCESS_ALL_ATTACHMENTS=true` – bypass invoice heuristics and forward every non-inline attachment (default `false` uses subject/filename/sender heuristics).

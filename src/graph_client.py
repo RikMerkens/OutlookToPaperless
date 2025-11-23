@@ -18,6 +18,17 @@ from .utils import isoformat_utc, parse_graph_datetime
 
 logger = logging.getLogger(__name__)
 
+_FOLDER_SEGMENT_UNSET = object()
+_WELL_KNOWN_MAIL_FOLDERS = {
+    "archive",
+    "deleteditems",
+    "drafts",
+    "inbox",
+    "junkemail",
+    "outbox",
+    "sentitems",
+}
+
 
 class GraphClient:
     """Thin wrapper that authenticates with Graph and yields attachments."""
@@ -32,6 +43,8 @@ class GraphClient:
         self.auth_mode = settings.graph_auth_mode
         self.authority = settings.authority_url
         self._token_cache = None
+        self._mail_folder_segment_cache: str | None | object = _FOLDER_SEGMENT_UNSET
+        self._folder_lookup_cache: dict[tuple[str | None, str], str] = {}
 
         if self.auth_mode == "client_credentials":
             self.app = msal.ConfidentialClientApplication(
@@ -55,7 +68,7 @@ class GraphClient:
         self, received_since: datetime | None = None, max_messages: int | None = None
     ) -> Iterator[Tuple[MessageMetadata, list[AttachmentMetadata]]]:
         """Yield messages (with attachment metadata) that have file attachments."""
-        url = f"{self.GRAPH_BASE}{self._messages_root()}/messages"
+        url = self._messages_collection_url()
         server_filter_supported = self.settings.graph_mailbox is not None
 
         params = {
@@ -152,6 +165,86 @@ class GraphClient:
             mailbox = quote(self.settings.graph_mailbox)
             return f"/users/{mailbox}"
         return "/me"
+
+    def _messages_collection_url(self) -> str:
+        folder_segment = self._mail_folder_segment()
+        root = self._messages_root()
+        if folder_segment:
+            return f"{self.GRAPH_BASE}{root}/mailFolders/{folder_segment}/messages"
+        return f"{self.GRAPH_BASE}{root}/messages"
+
+    def _mail_folder_segment(self) -> str | None:
+        if self._mail_folder_segment_cache is not _FOLDER_SEGMENT_UNSET:
+            return self._mail_folder_segment_cache
+
+        folder_spec = self.settings.graph_mail_folder
+        if not folder_spec:
+            self._mail_folder_segment_cache = None
+            return None
+
+        value = folder_spec.strip()
+        if not value or value.lower() in {"all", "messages"}:
+            self._mail_folder_segment_cache = None
+            return None
+
+        if value.lower().startswith("id:"):
+            segment = quote(value[3:])
+            self._mail_folder_segment_cache = segment
+            return segment
+
+        if "/" not in value and value.lower() in _WELL_KNOWN_MAIL_FOLDERS:
+            self._mail_folder_segment_cache = value
+            return value
+
+        folder_id = self._resolve_mail_folder_path(value)
+        segment = quote(folder_id)
+        self._mail_folder_segment_cache = segment
+        return segment
+
+    def _resolve_mail_folder_path(self, folder_path: str) -> str:
+        segments = [part.strip() for part in folder_path.split("/") if part.strip()]
+        if not segments:
+            raise RuntimeError("GRAPH_MAIL_FOLDER must not be empty after normalization.")
+
+        parent_id: str | None = None
+        for segment in segments:
+            parent_id = self._find_child_folder(segment, parent_id)
+        if not parent_id:
+            raise RuntimeError(f"Unable to resolve Graph mail folder path '{folder_path}'.")
+        return parent_id
+
+    def _find_child_folder(self, target_name: str, parent_id: str | None) -> str:
+        cache_key = (parent_id, target_name.lower())
+        cached = self._folder_lookup_cache.get(cache_key)
+        if cached:
+            return cached
+
+        if parent_id:
+            encoded_parent = quote(parent_id)
+            url = f"{self.GRAPH_BASE}{self._messages_root()}/mailFolders/{encoded_parent}/childFolders"
+            params = {"$select": "id,displayName,parentFolderId", "$top": 50}
+        else:
+            url = f"{self.GRAPH_BASE}{self._messages_root()}/mailFolders"
+            params = {
+                "$select": "id,displayName,parentFolderId",
+                "$top": 50,
+                "includeHiddenFolders": "true",
+            }
+
+        while url:
+            response = self._get(url, params=params)
+            payload = response.json()
+            for folder in payload.get("value", []):
+                name = folder.get("displayName", "")
+                if name.lower() == target_name.lower():
+                    folder_id = folder["id"]
+                    self._folder_lookup_cache[cache_key] = folder_id
+                    return folder_id
+            url = payload.get("@odata.nextLink")
+            params = None
+
+        context = "root" if parent_id is None else f"parent folder {parent_id}"
+        raise RuntimeError(f"Mail folder '{target_name}' not found under {context}.")
 
     def _list_file_attachments(self, message_id: str) -> list[AttachmentMetadata]:
         url = f"{self.GRAPH_BASE}{self._messages_root()}/messages/{message_id}/attachments"
