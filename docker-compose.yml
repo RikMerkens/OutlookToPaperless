@@ -1,0 +1,12 @@
+services:
+  docpush:
+    build: .
+    image: docpush-paperless
+    env_file:
+      - .env
+    environment:
+      - RUN_INTERVAL_SECONDS=0
+    volumes:
+      - ./data:/app/data
+    command: ["--since-days", "2"]
+

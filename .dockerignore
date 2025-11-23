@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.cursor
+data/msal_token_cache.bin
+data/processed_emails.db
+out.plan.md
+*.log
+

@@ -1,0 +1,7 @@
+msal>=1.28.0
+requests>=2.32.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+pydantic-settings>=2.2.1
+sqlite-utils>=3.37.0
+
