@@ -4,7 +4,6 @@
       "config:recommended"
     ],
     "timezone": "Europe/Amsterdam",
-    "schedule": ["* 2 * * *","* 3 * * *"],
     "packageRules": [
       {
         "matchUpdateTypes": [

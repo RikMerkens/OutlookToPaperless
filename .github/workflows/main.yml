@@ -10,8 +10,20 @@ on:
     branches: [ "main" ]
     # Publish semver tags as releases.
     tags: [ 'v*.*.*' ]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
   pull_request:
-    branches: [ "main" ]      
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
   workflow_dispatch:  # This allows manual triggering of the workflow
 
 env:
