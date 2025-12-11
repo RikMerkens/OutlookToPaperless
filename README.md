@@ -1,6 +1,6 @@
 # OutlookToPaperless
 
-Automation pipeline that downloads invoice attachments from Outlook (via Microsoft Graph) and uploads them to Paperless-ngx. OneDrive export can be added later; the current focus is Outlook ➜ Paperless with strong metadata retention and deduplication.
+Automation pipeline that downloads invoice attachments from Outlook (via Microsoft Graph) and uploads them to Paperless-ngx.the current focus is Outlook ➜ Paperless with strong metadata retention and deduplication.
 
 ## Prerequisites
 - Python 3.11+
@@ -107,7 +107,4 @@ docker compose up --build
 - **Container-internal scheduling:** For lightweight setups, you can wrap the script with a shell loop:
   Use the built-in `RUN_INTERVAL_SECONDS` variable (see above) so the entrypoint re-runs automatically without external schedulers. Host-level schedulers still offer clearer observability, but the env flag lets you keep everything self-contained when desired.
 
-
-## Extending toward OneDrive
-The orchestration script leaves a placeholder hook for forwarding uploaded files to OneDrive. Once ready, plug in an uploader that uses the same in-memory `AttachmentPayload` so metadata and dedupe entries stay consistent.
 
