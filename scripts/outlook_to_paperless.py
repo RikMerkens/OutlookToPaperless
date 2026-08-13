@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 from dotenv import load_dotenv
+import requests
 
 # Ensure project root is on sys.path when running as a script
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ from src.config import Settings
 from src.dedupe_cache import DedupeCache
 from src.graph_client import GraphClient
 from src.invoice_filter import InvoiceFilter
-from src.paperless_client import PaperlessClient
+from src.paperless_client import PaperlessClient, PaperlessTaskFailed
 from src.utils import ensure_utc, sha256_hex
 
 load_dotenv()
@@ -80,7 +81,7 @@ def main() -> None:
         allow_all=settings.process_all_attachments,
     )
 
-    stats = {"processed": 0, "skipped": 0, "uploaded": 0}
+    stats = {"processed": 0, "skipped": 0, "uploaded": 0, "pending": 0, "failed": 0}
 
     for message, attachments in graph_client.iter_messages(
         received_since=since, max_messages=args.max_messages
@@ -99,72 +100,140 @@ def main() -> None:
                 stats["skipped"] += 1
                 continue
 
-            if cache.seen(message.message_id, attachment.attachment_id):
-                logging.info(
-                    "Already processed message %s attachment %s; skipping",
-                    message.internet_message_id,
-                    attachment.name,
-                )
-                stats["skipped"] += 1
-                continue
-
-            stats["processed"] += 1
-
             if args.dry_run:
                 logging.info(
                     "[DRY-RUN] Would upload '%s' from message '%s'",
                     attachment.name,
                     message.subject,
                 )
+                stats["processed"] += 1
                 continue
 
-            content = graph_client.download_attachment(message.message_id, attachment.attachment_id)
-            checksum = sha256_hex(content)
-
-            metadata = {
-                "sender_email": message.sender_email,
-                "sender_name": message.sender_name,
-                "subject": message.subject,
-                "internet_message_id": message.internet_message_id,
-                "graph_message_id": message.message_id,
-                "graph_web_link": message.web_link,
-                "categories": message.categories,
-                "checksum": checksum,
-                "content_type": attachment.content_type,
-                "size": attachment.size,
-            }
-
-            title = settings.invoice_title(message.subject, attachment.name)
-            paperless_id = paperless_client.upload_document(
-                file_bytes=content,
-                filename=attachment.name,
-                title=title,
-                created=message.received,
-                metadata=metadata,
-            )
-
-            if paperless_id is None:
-                logging.warning(
-                    "Paperless did not return a document id for attachment '%s'; recorded as processed anyway",
-                    attachment.name,
-                )
-
-            cache.record(
+            existing = cache.claim(
                 message_id=message.message_id,
                 internet_message_id=message.internet_message_id,
                 attachment_id=attachment.attachment_id,
-                checksum=checksum,
-                paperless_document_id=paperless_id,
             )
-            stats["uploaded"] += 1
+            if existing is not None:
+                if existing.status == "pending" and existing.task_id:
+                    try:
+                        completion = paperless_client.wait_for_task(existing.task_id)
+                    except PaperlessTaskFailed as exc:
+                        logging.error("Paperless task %s failed: %s", existing.task_id, exc)
+                        cache.mark_failed(
+                            message_id=existing.message_id,
+                            attachment_id=attachment.attachment_id,
+                        )
+                        stats["failed"] += 1
+                    except (requests.RequestException, RuntimeError) as exc:
+                        logging.warning("Unable to check Paperless task %s: %s", existing.task_id, exc)
+                        stats["pending"] += 1
+                    else:
+                        if completion is None:
+                            logging.info("Paperless task %s is still pending", existing.task_id)
+                            stats["pending"] += 1
+                        else:
+                            cache.mark_complete(
+                                message_id=existing.message_id,
+                                attachment_id=attachment.attachment_id,
+                                checksum=existing.checksum,
+                                paperless_document_id=completion.document_id,
+                            )
+                            stats["uploaded"] += 1
+                    continue
+
+                logging.info(
+                    "Attachment %s for message %s is already %s; skipping",
+                    attachment.name,
+                    message.internet_message_id,
+                    existing.status,
+                )
+                stats["skipped"] += 1
+                continue
+
+            stats["processed"] += 1
+
+            try:
+                content = graph_client.download_attachment(message.message_id, attachment.attachment_id)
+                checksum = sha256_hex(content)
+                metadata = {
+                    "sender_email": message.sender_email,
+                    "sender_name": message.sender_name,
+                    "subject": message.subject,
+                    "internet_message_id": message.internet_message_id,
+                    "graph_message_id": message.message_id,
+                    "graph_web_link": message.web_link,
+                    "categories": message.categories,
+                    "checksum": checksum,
+                    "content_type": attachment.content_type,
+                    "size": attachment.size,
+                }
+                receipt = paperless_client.upload_document(
+                    file_bytes=content,
+                    filename=attachment.name,
+                    title=settings.invoice_title(message.subject, attachment.name),
+                    created=message.received,
+                    metadata=metadata,
+                )
+            except (requests.RequestException, RuntimeError) as exc:
+                logging.error("Unable to upload attachment '%s': %s", attachment.name, exc)
+                cache.mark_failed(
+                    message_id=message.message_id,
+                    attachment_id=attachment.attachment_id,
+                )
+                stats["failed"] += 1
+                continue
+
+            if receipt.document_id is not None:
+                cache.mark_complete(
+                    message_id=message.message_id,
+                    attachment_id=attachment.attachment_id,
+                    checksum=checksum,
+                    paperless_document_id=receipt.document_id,
+                )
+                stats["uploaded"] += 1
+                continue
+
+            cache.mark_pending(
+                message_id=message.message_id,
+                attachment_id=attachment.attachment_id,
+                checksum=checksum,
+                task_id=receipt.task_id,
+            )
+            try:
+                completion = paperless_client.wait_for_task(receipt.task_id)
+            except PaperlessTaskFailed as exc:
+                logging.error("Paperless task %s failed: %s", receipt.task_id, exc)
+                cache.mark_failed(
+                    message_id=message.message_id,
+                    attachment_id=attachment.attachment_id,
+                )
+                stats["failed"] += 1
+            except (requests.RequestException, RuntimeError) as exc:
+                logging.warning("Unable to check Paperless task %s: %s", receipt.task_id, exc)
+                stats["pending"] += 1
+            else:
+                if completion is None:
+                    logging.info("Paperless task %s is still pending", receipt.task_id)
+                    stats["pending"] += 1
+                else:
+                    cache.mark_complete(
+                        message_id=message.message_id,
+                        attachment_id=attachment.attachment_id,
+                        checksum=checksum,
+                        paperless_document_id=completion.document_id,
+                    )
+                    stats["uploaded"] += 1
 
             # Placeholder for optional OneDrive sync hook.
             # onedrive_client.upload_if_enabled(...)
 
     logging.info(
-        "Run complete: processed=%s uploaded=%s skipped=%s",
+        "Run complete: processed=%s uploaded=%s pending=%s failed=%s skipped=%s",
         stats["processed"],
         stats["uploaded"],
+        stats["pending"],
+        stats["failed"],
         stats["skipped"],
     )
 

@@ -1,6 +1,6 @@
 # OutlookToPaperless
 
-Automation pipeline that downloads invoice attachments from Outlook (via Microsoft Graph) and uploads them to Paperless-ngx.the current focus is Outlook ➜ Paperless with strong metadata retention and deduplication.
+Automation pipeline that downloads invoice attachments from Outlook (via Microsoft Graph) and uploads them to Paperless-ngx. The current focus is Outlook-to-Paperless transfer with deduplication.
 
 ## Prerequisites
 - Python 3.11+
@@ -42,7 +42,7 @@ To schedule the sync, run the script via Windows Task Scheduler or cron (inside 
    docker build -t docpush-paperless .
    ```
 2. Ensure `.env` exists on the host and contains your secret values. The container reads it at runtime via `--env-file`.
-3. Mount the `data/` directory so the SQLite dedupe DB and MSAL token cache persist between runs:
+3. The image runs as non-root UID/GID `10001`. Mount a `data/` directory writable by that UID so the SQLite dedupe DB and MSAL token cache persist between runs (for example, `mkdir -p data && chown 10001:10001 data` on Linux):
    ```bash
    docker run --rm -it \
      --env-file .env \
@@ -76,7 +76,7 @@ docker run --rm \
   docpush-paperless \
   --since-days 2
 ```
-The example above loops every 10 minutes (600 seconds). Leave the variable unset/zero to run just once.
+The example above loops every 10 minutes (600 seconds). Failed loop iterations are logged and retried on the next interval. Leave the variable unset/zero to run just once; one-shot runs exit with the script's failure status.
 
 ### docker-compose helper
 `docker-compose.yml` is included for convenience:
@@ -106,5 +106,3 @@ docker compose up --build
 - **docker-compose + cron:** Keep the stack up (`docker compose up -d`), then have cron invoke `docker compose run --rm docpush --since-days 2`. This reuses the built image and shared data volume.
 - **Container-internal scheduling:** For lightweight setups, you can wrap the script with a shell loop:
   Use the built-in `RUN_INTERVAL_SECONDS` variable (see above) so the entrypoint re-runs automatically without external schedulers. Host-level schedulers still offer clearer observability, but the env flag lets you keep everything self-contained when desired.
-
-
