@@ -10,10 +10,14 @@ run_once() {
 if [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]] && [ "$INTERVAL_SECONDS" -gt 0 ]; then
   echo "Running in loop every ${INTERVAL_SECONDS}s"
   while true; do
-    run_once "$@"
+    if run_once "$@"; then
+      :
+    else
+      status=$?
+      echo "Run failed with exit status ${status}; retrying in ${INTERVAL_SECONDS}s" >&2
+    fi
     sleep "$INTERVAL_SECONDS"
   done
 else
   run_once "$@"
 fi
-

@@ -1,4 +1,8 @@
-.venv
+.env
+.env.*
+data/
+.venv/
+venv/
 __pycache__
 *.pyc
 *.pyo
@@ -6,8 +10,6 @@ __pycache__
 .git
 .gitignore
 .cursor
-data/msal_token_cache.bin
-data/processed_emails.db
 out.plan.md
 *.log
 
