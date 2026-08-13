@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterator, List, Tuple
 from urllib.parse import quote
@@ -35,6 +39,8 @@ class GraphClient:
 
     GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
     GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    MAX_REQUEST_ATTEMPTS = 4
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -73,15 +79,21 @@ class GraphClient:
 
         params = {
             "$select": "id,subject,internetMessageId,from,receivedDateTime,webLink,categories,bodyPreview,hasAttachments",
-            "$orderby": "receivedDateTime desc",
             "$top": self.settings.graph_page_size,
         }
 
         if server_filter_supported:
-            filter_clauses = ["hasAttachments eq true"]
             if received_since:
-                filter_clauses.append(f"receivedDateTime ge {isoformat_utc(received_since)}")
-            params["$filter"] = " and ".join(filter_clauses)
+                # Graph requires ordered properties to lead the filter expression.
+                params["$orderby"] = "receivedDateTime desc"
+                params["$filter"] = (
+                    f"receivedDateTime ge {isoformat_utc(received_since)} "
+                    "and hasAttachments eq true"
+                )
+            else:
+                params["$filter"] = "hasAttachments eq true"
+        else:
+            params["$orderby"] = "receivedDateTime desc"
 
         yielded = 0
         while url:
@@ -117,12 +129,51 @@ class GraphClient:
         return response.content
 
     def _get(self, url: str, params: dict | None = None, stream: bool = False) -> Response:
-        headers = {"Authorization": f"Bearer {self._acquire_token()}"}
-        resp = self.session.get(url, headers=headers, params=params, stream=stream, timeout=30)
-        if resp.status_code >= 400:
-            logger.error("Graph request failed (%s): %s", resp.status_code, resp.text)
-            resp.raise_for_status()
-        return resp
+        headers = {
+            "Authorization": f"Bearer {self._acquire_token()}",
+            "Prefer": 'IdType="ImmutableId"',
+        }
+        for attempt in range(self.MAX_REQUEST_ATTEMPTS):
+            try:
+                resp = self.session.get(
+                    url, headers=headers, params=params, stream=stream, timeout=30
+                )
+            except requests.RequestException:
+                if attempt == self.MAX_REQUEST_ATTEMPTS - 1:
+                    raise
+                self._sleep_before_retry(None, attempt)
+                continue
+
+            if resp.status_code not in self.RETRYABLE_STATUS_CODES:
+                if resp.status_code >= 400:
+                    logger.error("Graph request failed (%s): %s", resp.status_code, resp.text)
+                    resp.raise_for_status()
+                return resp
+
+            if attempt == self.MAX_REQUEST_ATTEMPTS - 1:
+                logger.error("Graph request failed (%s): %s", resp.status_code, resp.text)
+                resp.raise_for_status()
+
+            logger.warning("Graph request returned %s; retrying", resp.status_code)
+            self._sleep_before_retry(resp, attempt)
+            resp.close()
+
+        raise RuntimeError("Graph request retry loop terminated unexpectedly.")
+
+    @staticmethod
+    def _sleep_before_retry(response: Response | None, attempt: int) -> None:
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        if retry_after:
+            try:
+                delay = max(0.0, float(retry_after))
+            except ValueError:
+                try:
+                    delay = max(0.0, (parsedate_to_datetime(retry_after) - datetime.now().astimezone()).total_seconds())
+                except (TypeError, ValueError):
+                    delay = float(2**attempt)
+        else:
+            delay = float(2**attempt)
+        time.sleep(delay)
 
     def _acquire_token(self) -> str:
         if self.auth_mode == "client_credentials":
@@ -158,7 +209,15 @@ class GraphClient:
             return
         cache_path: Path = self.settings.graph_token_cache
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(self._token_cache.serialize())
+        fd, temporary_path = tempfile.mkstemp(prefix=f".{cache_path.name}.", dir=cache_path.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as cache_file:
+                cache_file.write(self._token_cache.serialize())
+            os.replace(temporary_path, cache_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def _messages_root(self) -> str:
         if self.settings.graph_mailbox:
@@ -288,4 +347,3 @@ class GraphClient:
             size=raw.get("size", 0),
             is_inline=raw.get("isInline", False),
         )
-
